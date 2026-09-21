@@ -81,22 +81,81 @@ def calc(data, p):
 def check(ticker, p, near, lb):
     try:
         t = yf.Ticker(ticker)
-        d = t.history(period=lb, auto_adjust=True)
-        if d.empty or len(d) < p + 10: return None
-        d = calc(d, p)
+        d = t.history(period="2y", auto_adjust=True)  # 2y fetch karo (1y strict check ke liye)
+        
+        # ✅ Today's incomplete candle remove
+        if len(d) > 1:
+            d = d.iloc[:-1]
+        
+        # Minimum 1 year data hona chahiye
+        if d.empty or len(d) < 250:
+            return None
+        
+        # EMA calculate
+        d['E200'] = d['Close'].ewm(span=p, adjust=False).mean()
+        d['E50'] = d['Close'].ewm(span=50, adjust=False).mean()
+        d['E20'] = d['Close'].ewm(span=20, adjust=False).mean()
+        
+        # ============================================================
+        # 🚨 STRICT CONDITION 1: Pichhle 1 saal me EMA kabhi price ke upar nahi aayi
+        # ============================================================
+        # Last 250 trading days (1 year) ka data
+        last_1y = d.tail(250)
+        
+        # Har din check karo: kya Close > EMA_200 tha?
+        # Agar kabhi bhi Close <= EMA_200 hua, to 'all()' False dega
+        always_above_ema = (last_1y['Close'] > last_1y['E200']).all()
+        
+        if not always_above_ema:
+            return None  # ❌ Reject — kabhi bhi price 200 EMA ke neeche gaya
+        
+        # ============================================================
+        # 🚨 STRICT CONDITION 2: 200 EMA khud bhi pichhle 1 saal me rising ho
+        # ============================================================
+        ema_start = float(last_1y['E200'].iloc[0])   # 1 saal pehle ki EMA
+        ema_now = float(last_1y['E200'].iloc[-1])    # aaj ki EMA
+        
+        if ema_now <= ema_start:
+            return None  # ❌ Reject — 200 EMA flat ya falling hai
+        
+        # ============================================================
+        # Baaki conditions
+        # ============================================================
         L = d.iloc[-1]
-        c = float(L['Close']); e200 = float(L['E200']); e50 = float(L['E50']); e20 = float(L['E20'])
+        c = float(L['Close'])
+        e200 = float(L['E200'])
+        e50 = float(L['E50'])
+        e20 = float(L['E20'])
+        
         dist = ((c - e200) / e200) * 100
-        if c > e200 and abs(dist) <= near:
-            rising = e200 > (float(d['E200'].iloc[-20]) if len(d) >= 20 else e200)
-            chg5 = ((c - float(d['Close'].iloc[-6])) / float(d['Close'].iloc[-6])) * 100 if len(d) >= 6 else 0
+        is_stack = (e20 > e50) and (e50 > e200)
+        chg5 = ((c - float(d['Close'].iloc[-6])) / float(d['Close'].iloc[-6])) * 100 if len(d) >= 6 else 0
+        
+        # Strict EMA rise % over 1 year
+        ema_rise_pct = ((ema_now - ema_start) / ema_start) * 100
+        
+        # ============================================================
+        # 🎯 FINAL FILTER
+        # ============================================================
+        if (c > e200 and              # Price above 200 EMA (aaj)
+            c > e50 and               # Price above 50 EMA (aaj)
+            abs(dist) <= near and     # Near 200 EMA (±5%)
+            is_stack and              # Bullish stack 20>50>200
+            always_above_ema and      # ✅ 1 saal strict check
+            ema_now > ema_start):     # ✅ 1 saal EMA rising
+            
             return {
-                "Ticker": ticker.replace(".NS",""), "Price": round(c,2),
-                "200_EMA": round(e200,2), "50_EMA": round(e50,2), "20_EMA": round(e20,2),
-                "Distance_%": round(dist,2),
-                "Bullish_Stack": "✅" if (e20 > e50 and e50 > e200) else "❌",
-                "EMA_Rising": "✅" if rising else "❌",
-                "5D_Change_%": round(chg5,2), "Volume": int(L['Volume']),
+                "Ticker": ticker.replace(".NS",""),
+                "Price": round(c, 2),
+                "200_EMA": round(e200, 2),
+                "50_EMA": round(e50, 2),
+                "20_EMA": round(e20, 2),
+                "Distance_%": round(dist, 2),
+                "EMA_1Y_Rise_%": round(ema_rise_pct, 2),   # ⭐ Naya column
+                "Bullish_Stack": "✅",
+                "EMA_Rising": "✅",
+                "5D_Change_%": round(chg5, 2),
+                "Volume": int(L['Volume']),
             }
         return None
     except Exception:
